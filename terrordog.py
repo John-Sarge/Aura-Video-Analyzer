@@ -8,7 +8,7 @@ import math
 import time
 
 class AuraAnalyzer:
-    def __init__(self, obj_path):
+    def __init__(self):
         # 1. Initialize RealSense D435i
         self.pipeline = rs.pipeline()
         config = rs.config()
@@ -37,64 +37,48 @@ class AuraAnalyzer:
         # 3. Initialize 3D Renderer (Pyrender)
         self.scene = pyrender.Scene(bg_color=[0, 0, 0, 255]) # Black background
         
-        # Load the Terror Dog model
-        sm = trimesh.load(obj_path)
+        # Setup Models Configuration
+        # You can easily add more models here. Map a keyboard key ('t', 's', etc.) to the model file
+        # 'base_rot' helps fix initial orientation if an OBJ is upside down or facing wrong way: [x_rot, y_rot, z_rot] in radians
+        # 'base_scale' adjusts how large or close the model appears by default (default is 1.0)
+        self.models_config = {
+            't': {
+                'file': 'terrordog.obj',
+                'base_rot': [math.radians(-90), math.radians(-90), math.radians(180)],
+                'base_scale': 0.80
+            },
+            's': {
+                'file': 'slimer.obj',
+                # If the bottom is facing the camera and the face is looking up, you need to "pitch" it forward by 90 degrees along the X-axis
+                'base_rot': [math.radians(90), 0.0, 0.0],
+                'base_scale': 0.50
+            },
+            'v': {
+                'file': 'vigo.obj',
+                # If the bottom is facing the camera and the face is looking up, you need to "pitch" it forward by 90 degrees along the X-axis
+                'base_rot': [math.radians(90), 0.0, 0.0],
+                'base_scale': 0.4
+            },
+            'm': {
+                'file': 'muncher.obj',
+                # If the bottom is facing the camera and the face is looking up, you need to "pitch" it forward by 90 degrees along the X-axis
+                'base_rot': [math.radians(180), 0.0, 0.0],
+                'base_scale': 0.5
+            },
+            'h': {
+                'file': 'human.obj',
+                # If the bottom is facing the camera and the face is looking up, you need to "pitch" it forward by 90 degrees along the X-axis
+                'base_rot': [math.radians(90), 0.0, 0.0],
+                'base_scale': 0.5
+            }
+        }
         
-        # FIX: Center and Auto-Scale the 3D model so it's guaranteed to be visible
-        # If the OBJ was exported in very large or small units (e.g., mm vs meters), we won't see it without this.
-        center = sm.bounds.mean(axis=0)
-        sm.apply_translation(-center)
-        max_extent = np.max(sm.extents)
-        if max_extent > 0:
-            sm.apply_scale(4.0 / max_extent) # Scale to a visible size of ~4 units
+        self.loaded_meshes = {}
+        self.model_node = None
+        self.user_rotation_angles = [0.0, 0.0, 0.0]
+        self.user_scale = 1.0  # Interactive scale multiplier
 
-        # FIX: The user reported seeing the bottom of the model with the chin pointing left.
-        # This resolves the 3D model orientation by mapping coordinates.
-        # 1. Rotate 90 degrees around X-axis (tips the model up from its belly)
-        rot_x = trimesh.transformations.rotation_matrix(math.radians(-90), [1, 0, 0])
-        sm.apply_transform(rot_x)
-        # 2. Rotate 90 degrees around Y-axis (turns the model horizontally so chin faces forward instead of left)
-        rot_y = trimesh.transformations.rotation_matrix(math.radians(-90), [0, 1, 0])
-        sm.apply_transform(rot_y)
-        # 3. Rotate 180 degrees around Z-axis (flips the model upright since it was upside down)
-        rot_z = trimesh.transformations.rotation_matrix(math.radians(180), [0, 0, 1])
-        sm.apply_transform(rot_z)
         
-        # FIX: The "Aura/Heat Signature" Visual Overhaul
-        # We compute the surface direction (normals) of every polygon on the Terror Dog.
-        # By mapping these 3D directions into Red, Green, and Blue colors, we create 
-        # that flat, blotchy, retro "Matcap" / thermal look seen in the Ghostbusters film.
-        normals = np.abs(sm.vertex_normals)
-        colors_float = np.zeros((len(normals), 4), dtype=np.float32)
-        
-        # NEW COLOR MAPPING: Ghost1.png is mostly deep black with distinct patches of blue and green around the edges.
-        # To get the black front face and colored outlines, we map the colors to the "grazing angles" (surfaces curving away from the camera).
-        
-        # Red is virtually non-existent, just a tiny bit on top/bottom ridges
-        colors_float[:, 0] = np.power(normals[:, 1], 6) * 40.0   
-        
-        # Green forms the "outline". (1.0 - normal_Z) means faces pointing AT the camera are 0.0 (Black).
-        # Faces curving away from the camera light up brightly! Raising to power 4 sharpens this outline band.
-        colors_float[:, 1] = np.power(1.0 - normals[:, 2], 4) * 220.0  
-        
-        # Blue prominently highlights the sides and the horns (high X normal)
-        colors_float[:, 2] = np.power(normals[:, 0], 3) * 255.0  
-        colors_float[:, 3] = 255.0                               # Alpha (Fully opaque)
-        
-        # Add a little low-fi analog noise
-        noise = np.random.uniform(-15, 20, size=colors_float[:, :3].shape)
-        colors_float[:, :3] += noise
-        
-        # Subtract a heavier baseline to violently crush the entire front face and noise pixels down into pure black
-        colors_float[:, :3] -= 35.0
-        
-        # Clip to valid 0-255 and apply to mesh
-        sm.visual.vertex_colors = np.clip(colors_float, 0, 255).astype(np.uint8)
-
-        # Calling from_trimesh(sm) dynamically generates the correct material WITH our vertex colors included.
-        mesh = pyrender.Mesh.from_trimesh(sm, smooth=False)
-        self.dog_node = self.scene.add(mesh)
-
         # Set ambient light back down so it doesn't artificially brighten the dark areas
         self.scene.ambient_light = [0.8, 0.8, 0.8]
 
@@ -102,6 +86,61 @@ class AuraAnalyzer:
         self.camera = pyrender.IntrinsicsCamera(fx=1000, fy=1000, cx=640, cy=360)
         self.cam_node = self.scene.add(self.camera, pose=np.eye(4))
         self.renderer = pyrender.OffscreenRenderer(1280, 720)
+        
+        # Load the default model
+        self.switch_model('t')
+
+    def switch_model(self, key_char):
+        if key_char not in self.models_config:
+            return
+            
+        # Remove existing model from scene
+        if self.model_node is not None:
+            self.scene.remove_node(self.model_node)
+            
+        # Load and cache model if not already loaded
+        if key_char not in self.loaded_meshes:
+            config = self.models_config[key_char]
+            
+            try:
+                sm = trimesh.load(config['file'])
+            except Exception as e:
+                print(f"Error loading {config['file']}: {e}")
+                return
+            
+            # Center and Auto-Scale the 3D model so it's guaranteed to be visible
+            center = sm.bounds.mean(axis=0)
+            sm.apply_translation(-center)
+            max_extent = np.max(sm.extents)
+            if max_extent > 0:
+                base_scale = config.get('base_scale', 1.0)
+                sm.apply_scale((4.0 / max_extent) * base_scale)
+
+            # Apply base orientations
+            rx, ry, rz = config.get('base_rot', [0.0, 0.0, 0.0])
+            if rx != 0: sm.apply_transform(trimesh.transformations.rotation_matrix(rx, [1, 0, 0]))
+            if ry != 0: sm.apply_transform(trimesh.transformations.rotation_matrix(ry, [0, 1, 0]))
+            if rz != 0: sm.apply_transform(trimesh.transformations.rotation_matrix(rz, [0, 0, 1]))
+            
+            # Apply "Aura/Heat Signature" Visual Overhaul
+            normals = np.abs(sm.vertex_normals)
+            colors_float = np.zeros((len(normals), 4), dtype=np.float32)
+            colors_float[:, 0] = np.power(normals[:, 1], 6) * 40.0   
+            colors_float[:, 1] = np.power(1.0 - normals[:, 2], 4) * 220.0  
+            colors_float[:, 2] = np.power(normals[:, 0], 3) * 255.0  
+            colors_float[:, 3] = 255.0
+            noise = np.random.uniform(-15, 20, size=colors_float[:, :3].shape)
+            colors_float[:, :3] += noise
+            colors_float[:, :3] -= 35.0
+            sm.visual.vertex_colors = np.clip(colors_float, 0, 255).astype(np.uint8)
+
+            mesh = pyrender.Mesh.from_trimesh(sm, smooth=False)
+            self.loaded_meshes[key_char] = mesh
+
+        # Add to scene
+        self.model_node = self.scene.add(self.loaded_meshes[key_char])
+        self.user_rotation_angles = [0.0, 0.0, 0.0]  # Reset interactive rotation
+        self.user_scale = 1.0  # Reset interactive scale
 
     def _translate_pose(self, x, y, z):
         pose = np.eye(4)
@@ -266,44 +305,52 @@ class AuraAnalyzer:
                 # RENDER LOGIC
                 if colander_streak > 3 and last_valid_pose is not None:
                     # NORMAL TRACKING
-                    self.scene.set_pose(self.dog_node, last_valid_pose)
-                    color, depth = self.renderer.render(self.scene)
-                    
-                    output_image = cv2.cvtColor(color, cv2.COLOR_RGB2BGR)
-                    output_image = cv2.GaussianBlur(output_image, (15, 15), 0)
-                    
-                    # Normal Light CRT Static
-                    h, w, _ = output_image.shape
-                    grain = np.random.randint(-15, 15, size=(h, w, 3), dtype=np.int16)
-                    output_image = np.clip(output_image.astype(np.int16) + grain, 0, 255).astype(np.uint8)
-                    output_image[::2, :, :] = (output_image[::2, :, :] * 0.5).astype(np.uint8)
-
+                    combined_pose = last_valid_pose.copy()
                 elif last_valid_pose is not None and (time.time() - last_seen_time) <= 5.0:
-                    # INTERFERENCE / LOST TRACKING MODE (Less than 5 seconds since last seen)
+                    # INTERFERENCE / LOST TRACKING MODE
+                    combined_pose = last_valid_pose.copy()
+                    combined_pose[0:3, 3] += np.random.uniform(-0.1, 0.1, 3) # Jitter XYZ translation
+                else:
+                    combined_pose = None
+
+                if combined_pose is not None:
+                    # Apply user runtime rotation offset
+                    rx, ry, rz = self.user_rotation_angles
+                    rot_x = trimesh.transformations.rotation_matrix(rx, [1, 0, 0])
+                    rot_y = trimesh.transformations.rotation_matrix(ry, [0, 1, 0])
+                    rot_z = trimesh.transformations.rotation_matrix(rz, [0, 0, 1])
+                    user_rot = trimesh.transformations.concatenate_matrices(rot_x, rot_y, rot_z)
                     
-                    # Randomly jitter the last known pose to simulate "searching" or connection drops
-                    jitter_pose = last_valid_pose.copy()
-                    jitter_pose[0:3, 3] += np.random.uniform(-0.1, 0.1, 3) # Jitter XYZ translation
-                    self.scene.set_pose(self.dog_node, jitter_pose)
+                    # Apply user runtime scale offset
+                    user_scale_mat = np.eye(4)
+                    user_scale_mat[0, 0] = self.user_scale
+                    user_scale_mat[1, 1] = self.user_scale
+                    user_scale_mat[2, 2] = self.user_scale
+
+                    final_pose = combined_pose @ user_rot @ user_scale_mat
                     
+                    self.scene.set_pose(self.model_node, final_pose)
                     color, depth = self.renderer.render(self.scene)
                     output_image = cv2.cvtColor(color, cv2.COLOR_RGB2BGR)
-                    
-                    # Heavy Blur
-                    output_image = cv2.GaussianBlur(output_image, (31, 31), 0)
-                    
-                    h, w, _ = output_image.shape
-                    
-                    # EXTREME Static Noise (like a lost TV channel)
-                    grain = np.random.randint(-150, 150, size=(h, w, 3), dtype=np.int16)
-                    
-                    # Horizontal tracking tear/glitch effect (randomly shift pixels left or right)
-                    if np.random.random() > 0.5:
-                        shift = np.random.randint(-150, 150)
-                        output_image = np.roll(output_image, shift, axis=1)
-                        
-                    output_image = np.clip(output_image.astype(np.int16) + grain, 0, 255).astype(np.uint8)
-                    output_image[::2, :, :] = (output_image[::2, :, :] * 0.5).astype(np.uint8)
+
+                    if colander_streak > 3:
+                        # Normal tracking rendering effects
+                        output_image = cv2.GaussianBlur(output_image, (15, 15), 0)
+                        h, w, _ = output_image.shape
+                        grain = np.random.randint(-15, 15, size=(h, w, 3), dtype=np.int16)
+                        output_image = np.clip(output_image.astype(np.int16) + grain, 0, 255).astype(np.uint8)
+                        output_image[::2, :, :] = (output_image[::2, :, :] * 0.5).astype(np.uint8)
+                    else:
+                        # Interference rendering effects
+                        output_image = cv2.GaussianBlur(output_image, (31, 31), 0)
+                        h, w, _ = output_image.shape
+                        grain = np.random.randint(-150, 150, size=(h, w, 3), dtype=np.int16)
+                        if np.random.random() > 0.5:
+                            shift = np.random.randint(-150, 150)
+                            output_image = np.roll(output_image, shift, axis=1)
+                        output_image = np.clip(output_image.astype(np.int16) + grain, 0, 255).astype(np.uint8)
+                        output_image[::2, :, :] = (output_image[::2, :, :] * 0.5).astype(np.uint8)
+
                 else:
                     # Totally lost (over 5 seconds). Reset pose and go back to pure black output
                     last_valid_pose = None
@@ -341,12 +388,38 @@ class AuraAnalyzer:
                 # Show output
                 cv2.imshow('Aura Video-Analyzer version 3.1', output_image)
 
-                if cv2.waitKey(1) & 0xFF == 27: # ESC to quit
-                    break
+                key = cv2.waitKeyEx(1)
+                if key != -1:
+                    key_val = key & 0xFF
+                    
+                    if key_val == 27: # ESC
+                        break
+                    
+                    char = chr(key_val).lower() if key_val < 256 else ''
+                    
+                    if char in self.models_config:
+                        self.switch_model(char)
+                    elif key_val == ord('x'):
+                        self.user_rotation_angles[0] += 0.2
+                    elif key_val == ord('X'):
+                        self.user_rotation_angles[0] -= 0.2
+                    elif key_val == ord('y'):
+                        self.user_rotation_angles[1] += 0.2
+                    elif key_val == ord('Y'):
+                        self.user_rotation_angles[1] -= 0.2
+                    elif key_val == ord('z'):
+                        self.user_rotation_angles[2] += 0.2
+                    elif key_val == ord('Z'):
+                        self.user_rotation_angles[2] -= 0.2
+                    elif key_val == ord('+') or key_val == ord('='):
+                        self.user_scale *= 1.1
+                    elif key_val == ord('-') or key_val == ord('_'):
+                        self.user_scale /= 1.1
+
         finally:
             self.pipeline.stop()
             cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    analyzer = AuraAnalyzer('terrordog.obj')
+    analyzer = AuraAnalyzer()
     analyzer.run()
